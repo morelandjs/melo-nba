@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
-from pyDOE import lhs
+from skopt import gp_minimize
 
 from melo import Melo
 from nba_games import games
+
+import matplotlib.pyplot as plt
 
 
 dates = games['date']
@@ -16,60 +19,83 @@ spreads = games['home_points'] - games['away_points']
 totals = games['home_points'] + games['away_points']
 
 
-def melo_wrapper(mode, k, bias, decay, smooth):
+def melo_wrapper(mode, k, bias, decay, smooth, verbose=False):
     """
     Thin wrapper to pass arguments to the Melo library.
 
     """
     values, lines = {
-        'Fermi': (spreads, np.arange(-60.5, 61.5)),
-        'Bose': (totals, np.arange(-115.5, 300.5)),
+        'fermi': (spreads, np.arange(-60.5, 61.5)),
+        'bose': (totals, np.arange(-115.5, 300.5)),
     }[mode]
 
     return Melo(
         dates, labels1, labels2, values, lines=lines,
-        mode=mode, k=k, bias=bias, smooth=smooth,
-        decay=lambda t: 1 if t < timedelta(weeks=20) else decay
+        k=k, bias=bias, smooth=smooth,
+        decay=lambda t: 1 if t < timedelta(weeks=20) else decay,
+        mode=mode, dist='normal'
     )
 
 
-def calibrate_model(mode, bounds, points=50):
+def from_cache(mode, retrain=False, **kwargs):
     """
-    Calibrate model hyperparameters
+    Load the melo args from the cache if available, otherwise
+    train and cache a new instance.
 
     """
-    lhsmin, lhsmax = map(np.array, zip(*bounds))
-    X = lhsmin + (lhsmax - lhsmin) * lhs(4, samples=points, criterion='maximin')
-    y = np.zeros((points, 1))
+    cachefile = Path('cachedir', '{}.cache'.format(mode.lower()))
 
-    for p, args in enumerate(X):
-        print('[INFO][melo_nba] evaluating design point: {}'.format(p))
+    if not retrain and cachefile.exists():
+        args = np.loadtxt(cachefile)
+        return melo_wrapper(mode, *args)
+
+    def obj(args):
         melo = melo_wrapper(mode, *args)
-        y[p] = np.std(melo.residuals(statistic='mean'))
+        return melo.entropy()
 
-    return X[np.argmin(y)]
+    x0 = {
+        'fermi': (0.20, 0.23, 0.70, 7.0),
+        'bose': (0.22, 0.00, 0.60, 7.0),
+    }[mode]
+
+    bounds = {
+        'fermi': [(0.0, 0.3), (0.0, 0.3), (0.5, 0.8), (0.0, 15.0)],
+        'bose': [(0.0, 0.3), (-0.01, 0.01), (0.5, 0.8), (0.0, 15.0)],
+    }[mode]
+
+    res = gp_minimize(obj, bounds, n_calls=100, n_jobs=4, verbose=True)
+
+    print("mode: {}".format(mode))
+    print("best mean absolute error: {:.4f}".format(res.fun))
+    print("best parameters: {}".format(res.x))
+
+    if not cachefile.parent.exists():
+        cachefile.parent.mkdir()
+
+    np.savetxt(cachefile, res.x)
+    return melo_wrapper(mode, *res.x)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    import argparse
 
-    for mode in 'Fermi', 'Bose':
+    parser = argparse.ArgumentParser(
+        description='calibrate model parameters for point spreads and totals',
+        argument_default=argparse.SUPPRESS
+    )
 
-        bounds = {
-            'Fermi': [(0.09, 0.15), (0.19, 0.25), (0.58, 0.68), (9.0, 9.4)],
-            'Bose': [(0.0, 0.3), (-1e-3, 1e-3), (0.5, 1.0), (0.0, 9.4)],
-        }[mode]
+    parser.add_argument(
+        '--retrain', action='store_true', default=False,
+        help='retrain even if model args are cached'
+    )
 
-        args = calibrate_model('Fermi', bounds)
+    args = parser.parse_args()
+    kwargs = vars(args)
 
-        print('[INFO][melo_nba] mode={}:'.format(mode),
-            'k={:.2f}, bias={:.2f}, decay={:.2f}, smooth={:.2f}'.format(*args))
-
-        nba_spreads = melo_wrapper(mode, *args)
-        residuals = nba_spreads.residuals(statistic='mean')
-        mae = np.abs(residuals).mean()
-        std = np.std(residuals)
-        print('[INFO][melo_nba] std dev={:.2f}, mae={:.2f}'.format(std, mae))
-
+    for mode in 'fermi', 'bose':
+        from_cache(mode, **kwargs)
 else:
-   nba_spreads = melo_wrapper('Fermi', 0.13, 0.23, 0.65, 9.18)
-   nba_totals = melo_wrapper('Bose', 0.12,  0.0, 0.68, 5.02)
+    nba_spreads = from_cache('fermi')
+    nba_totals = from_cache('bose')
+
+    nba_spreads.entropies()
