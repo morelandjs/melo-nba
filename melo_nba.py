@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -8,8 +7,6 @@ from skopt import gp_minimize
 
 from melo import Melo
 from nba_games import games
-
-import matplotlib.pyplot as plt
 
 
 dates = games['date']
@@ -19,21 +16,20 @@ spreads = games['home_points'] - games['away_points']
 totals = games['home_points'] + games['away_points']
 
 
-def melo_wrapper(mode, k, bias, decay, smooth, verbose=False):
+def melo_wrapper(mode, k, bias, regress, smooth, verbose=False):
     """
-    Thin wrapper to pass arguments to the Melo library.
+    Wrapper to pass arguments to the Melo library.
 
     """
     values, lines = {
-        'fermi': (spreads, np.arange(-60.5, 61.5)),
-        'bose': (totals, np.arange(-115.5, 300.5)),
+        'minus': (spreads, np.arange(-60.5, 61.5)),
+        'plus': (totals, np.arange(-115.5, 300.5)),
     }[mode]
 
     return Melo(
-        dates, labels1, labels2, values, lines=lines,
-        k=k, bias=bias, smooth=smooth,
-        decay=lambda t: 1 if t < timedelta(weeks=20) else decay,
-        mode=mode, dist='normal'
+        dates, labels1, labels2, values, mode,
+        lines=lines, k=k, bias=bias, smooth=smooth,
+        regress=lambda t: regress if t > np.timedelta64(12, 'W') else 0
     )
 
 
@@ -53,17 +49,22 @@ def from_cache(mode, retrain=False, **kwargs):
         melo = melo_wrapper(mode, *args)
         return melo.entropy()
 
-    x0 = {
-        'fermi': (0.20, 0.23, 0.70, 7.0),
-        'bose': (0.22, 0.00, 0.60, 7.0),
-    }[mode]
-
     bounds = {
-        'fermi': [(0.0, 0.3), (0.0, 0.3), (0.5, 0.8), (0.0, 15.0)],
-        'bose': [(0.0, 0.3), (-0.01, 0.01), (0.5, 0.8), (0.0, 15.0)],
+        'minus': [
+            (0.0,    0.3),
+            (0.0,    0.3),
+            (0.0,    0.5),
+            (0.0,   15.0),
+        ],
+        'plus': [
+            (0.0,    0.3),
+            (-0.01, 0.01),
+            (0.0,    0.5),
+            (0.0,   15.0),
+        ],
     }[mode]
 
-    res = gp_minimize(obj, bounds, n_calls=100, n_jobs=4, verbose=True)
+    res = gp_minimize(obj, bounds, n_calls=20, n_jobs=4, verbose=True)
 
     print("mode: {}".format(mode))
     print("best mean absolute error: {:.4f}".format(res.fun))
@@ -92,10 +93,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     kwargs = vars(args)
 
-    for mode in 'fermi', 'bose':
+    for mode in 'minus', 'plus':
         from_cache(mode, **kwargs)
 else:
-    nba_spreads = from_cache('fermi')
-    nba_totals = from_cache('bose')
-
-    nba_spreads.entropies()
+    nba_spreads = from_cache('minus')
+    nba_totals = from_cache('plus')
