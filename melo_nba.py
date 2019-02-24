@@ -64,7 +64,7 @@ def from_cache(mode, retrain=False, **kwargs):
         ],
     }[mode]
 
-    res = gp_minimize(obj, bounds, n_calls=20, n_jobs=4, verbose=True)
+    res = gp_minimize(obj, bounds, n_calls=100, n_jobs=4, verbose=True)
 
     print("mode: {}".format(mode))
     print("best mean absolute error: {:.4f}".format(res.fun))
